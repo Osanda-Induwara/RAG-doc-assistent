@@ -40,10 +40,20 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Default Gemini model (free tier: gemini-1.5-flash at https://aistudio.google.com)
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+# Default Gemini model — see https://ai.google.dev/gemini-api/docs/models
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 load_dotenv()
+
+
+def get_gemini_api_key() -> Optional[str]:
+    """GEMINI_API_KEY in .env, or GOOGLE_API_KEY as alias."""
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return key.strip() if key else None
+
+
+def get_gemini_model() -> str:
+    return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
 
 
 def _streamlit_secrets_available() -> bool:
@@ -470,16 +480,6 @@ def process_pdf(uploaded_file) -> bool:
 def file_signature(uploaded_file) -> str:
     """Unique id so we only re-index when the user picks a different file."""
     return f"{uploaded_file.name}:{uploaded_file.size}"
-
-
-def get_gemini_api_key() -> Optional[str]:
-    """GEMINI_API_KEY in .env, or GOOGLE_API_KEY as alias."""
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return key.strip() if key else None
-
-
-def get_gemini_model() -> str:
-    return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
 
 
 def run_rag_query(question: str) -> str:

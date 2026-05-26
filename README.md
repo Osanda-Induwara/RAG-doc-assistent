@@ -80,10 +80,10 @@ Edit `.env`:
 GEMINI_API_KEY=your-actual-key-from-aistudio
 ```
 
-Optional — change the model (default `gemini-1.5-flash`):
+Optional — change the model (default `gemini-2.5-flash`):
 
 ```env
-GEMINI_MODEL=gemini-1.5-flash
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
 **You do not need** a `.streamlit/secrets.toml` file for local development — use `.env` only. For Streamlit Cloud, set `GEMINI_API_KEY` in the app's Secrets UI.
