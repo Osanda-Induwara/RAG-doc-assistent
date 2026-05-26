@@ -3,8 +3,41 @@ DocMind — RAG-based Document Assistant (Streamlit)
 Upload a PDF, ask questions, get answers grounded in your document.
 """
 
-import base64
+# Env + telemetry patches must run before chromadb / torch are imported
 import os
+import warnings
+
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY"] = "False"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+warnings.filterwarnings("ignore", message=".*torch.classes.*")
+warnings.filterwarnings("ignore", message=".*Examining the path of torch.classes.*")
+
+
+def _silence_chroma_telemetry() -> None:
+    """Chroma 0.5 + newer PostHog breaks capture(); use a no-op client."""
+    try:
+        import chromadb.telemetry.product.posthog as posthog_mod
+
+        class _NoOpPosthog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def capture(self, *args, **kwargs):
+                return None
+
+            def identify(self, *args, **kwargs):
+                return None
+
+        posthog_mod.Posthog = _NoOpPosthog
+    except Exception:
+        pass
+
+
+_silence_chroma_telemetry()
+
+import base64
 import re
 import shutil
 import tempfile
@@ -21,18 +54,16 @@ BG_IMAGE_FALLBACK = (
 import fitz  # PyMuPDF
 import pyttsx3
 import streamlit as st
+from chromadb.config import Settings as ChromaSettings
 from dotenv import load_dotenv
-from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import Chroma
+from langchain_core.output_parsers import StrOutputParser
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Quiet Chroma/Hugging Face noise on Windows; disable broken Chroma telemetry
-os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
-os.environ.setdefault("CHROMA_TELEMETRY", "False")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+CHROMA_CLIENT_SETTINGS = ChromaSettings(anonymized_telemetry=False)
 
 # Load OPENAI_API_KEY from .env locally, platform env vars, or Streamlit secrets
 load_dotenv()
@@ -350,7 +381,6 @@ def init_session_state() -> None:
         "processed_file_signature": None,
         "pending_query": None,
         "auto_submit": False,
-        "reading": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -439,6 +469,7 @@ def process_pdf(uploaded_file) -> bool:
         embedding=embeddings,
         collection_name=collection_name,
         persist_directory=persist_dir,
+        client_settings=CHROMA_CLIENT_SETTINGS,
     )
 
     st.session_state.vectorstore = vectorstore
@@ -459,7 +490,7 @@ def get_openai_api_key() -> Optional[str]:
 
 
 def run_rag_query(question: str) -> str:
-    """Retrieve top-5 chunks, then answer with GPT-3.5-turbo via LLMChain."""
+    """Retrieve top-5 chunks, then answer with GPT-3.5-turbo (LangChain LCEL chain)."""
     retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 5})
     docs = retriever.invoke(question)
     context = "\n\n---\n\n".join(doc.page_content for doc in docs)
@@ -469,16 +500,12 @@ def run_rag_query(question: str) -> str:
         temperature=0.3,
         openai_api_key=get_openai_api_key(),
     )
-    chain = LLMChain(llm=llm, prompt=RAG_PROMPT)
-    result = chain.invoke({"context": context, "question": question})
-    # LLMChain may return {"text": "..."} or a message object depending on LangChain version
-    if isinstance(result, dict):
-        return result.get("text") or result.get("output") or str(result)
-    return str(result)
+    chain = RAG_PROMPT | llm | StrOutputParser()
+    return chain.invoke({"context": context, "question": question})
 
 
 def speak_text(text: str) -> None:
-    """Read response aloud with pyttsx3 (runs in a background thread)."""
+    """Read response aloud with pyttsx3 (background thread — no Streamlit context)."""
     try:
         engine = pyttsx3.init()
         engine.say(text)
@@ -486,17 +513,12 @@ def speak_text(text: str) -> None:
         engine.stop()
     except Exception:
         pass
-    finally:
-        st.session_state.reading = False
 
 
 def start_read_aloud(content: str) -> None:
-    """Start TTS in a daemon thread so the UI can show 'Reading...' status."""
-    if st.session_state.reading:
-        return
-    st.session_state.reading = True
-    thread = threading.Thread(target=speak_text, args=(content,), daemon=True)
-    thread.start()
+    """Play TTS in a daemon thread; avoid touching st.session_state from the thread."""
+    threading.Thread(target=speak_text, args=(content,), daemon=True).start()
+    st.toast("Reading aloud…", icon="🔊")
 
 
 def render_outside_knowledge_warning(text: str) -> None:
@@ -522,9 +544,6 @@ def display_ai_message(content: str, msg_index: int) -> None:
         render_outside_knowledge_warning(content)
     else:
         st.markdown(f'<div class="ai-bubble">{content}</div>', unsafe_allow_html=True)
-
-    if st.session_state.reading:
-        st.caption("🔊 Reading...")
 
     if st.button("🔊 Read Aloud", key=f"read_aloud_{msg_index}"):
         start_read_aloud(content)
