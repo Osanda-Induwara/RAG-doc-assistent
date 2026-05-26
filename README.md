@@ -5,8 +5,8 @@ A beginner-friendly **RAG** (Retrieval-Augmented Generation) web app built with 
 ## Features
 
 - PDF upload and text extraction (PyMuPDF)
-- Chunking + local embeddings (`all-MiniLM-L6-v2`) + in-memory ChromaDB
-- GPT-3.5-turbo answers via LangChain RAG pipeline
+- Chunking + local embeddings (`all-MiniLM-L6-v2`) + ChromaDB
+- **Google Gemini** answers via LangChain RAG pipeline (free tier at AI Studio)
 - Chat UI with shortcut prompts (comprehensive / one-line / plain English)
 - Read aloud (pyttsx3)
 - Source transparency for outside-knowledge sections
@@ -20,7 +20,7 @@ A beginner-friendly **RAG** (Retrieval-Augmented Generation) web app built with 
 | Chunking | LangChain `RecursiveCharacterTextSplitter` |
 | Embeddings | `sentence-transformers` via `langchain-huggingface` |
 | Vector DB | ChromaDB (session temp folder) |
-| LLM | OpenAI GPT-3.5-turbo (LangChain) |
+| LLM | Google Gemini (`langchain-google-genai`) |
 | TTS | pyttsx3 |
 
 ## Local setup
@@ -28,7 +28,7 @@ A beginner-friendly **RAG** (Retrieval-Augmented Generation) web app built with 
 ### 1. Prerequisites
 
 - Python 3.10 or 3.11 recommended
-- An [OpenAI API key](https://platform.openai.com/api-keys)
+- A free [Google AI Studio API key](https://aistudio.google.com/apikey) (Gemini)
 
 ### 2. Clone or download this folder
 
@@ -58,15 +58,6 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-> Run `python -m venv venv` and activate the venv as **two separate steps**. Do not paste the activate path into the `venv` command.
-
-**macOS / Linux:**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
 ### 4. Install dependencies
 
 ```bash
@@ -75,7 +66,7 @@ pip install -r requirements.txt
 
 > First run downloads the embedding model (~90 MB). This can take a few minutes.
 
-### 5. Configure OpenAI API key
+### 5. Configure Gemini API key
 
 Copy the example env file and add your key:
 
@@ -85,11 +76,17 @@ copy .env.example .env
 
 Edit `.env`:
 
-```
-OPENAI_API_KEY=sk-your-actual-key
+```env
+GEMINI_API_KEY=your-actual-key-from-aistudio
 ```
 
-**You do not need** a `.streamlit/secrets.toml` file for local development — use `.env` only. For Streamlit Cloud, set `OPENAI_API_KEY` in the app's Secrets UI (see `.streamlit/secrets.toml.example`).
+Optional — change the model (default `gemini-1.5-flash`):
+
+```env
+GEMINI_MODEL=gemini-1.5-flash
+```
+
+**You do not need** a `.streamlit/secrets.toml` file for local development — use `.env` only. For Streamlit Cloud, set `GEMINI_API_KEY` in the app's Secrets UI.
 
 ### 6. Run the app
 
@@ -101,40 +98,32 @@ Open the URL shown in the terminal (usually `http://localhost:8501`).
 
 ## Usage
 
-1. Ensure `OPENAI_API_KEY` is set in `.env`.
+1. Ensure `GEMINI_API_KEY` is set in `.env`.
 2. Upload a PDF below the question box — it indexes automatically (wait for “Ready”).
-3. Ask a question with **Search**, or use a shortcut button (Comprehensive / One Line / Plain English).
-4. Click **Read Aloud** under any AI reply to hear it (desktop; requires system TTS).
+3. Ask a question with **Search**, or use a shortcut button.
+4. Click **Read Aloud** under any AI reply to hear it (desktop only).
 
 ## Deploy to Streamlit Community Cloud
 
-1. Push this repo to GitHub (include `app.py`, `requirements.txt`, `README.md`).
-2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo.
+1. Push this repo to GitHub.
+2. Connect at [share.streamlit.io](https://share.streamlit.io).
 3. Set **Main file path** to `app.py`.
 4. Under **Secrets**, add:
 
    ```toml
-   OPENAI_API_KEY = "sk-your-key"
+   GEMINI_API_KEY = "your-gemini-api-key"
    ```
 
-5. Deploy. Chroma uses an **in-memory** client so no disk persistence is required on free tiers.
-
-> **Note:** `pyttsx3` read-aloud works on your local machine; cloud hosts usually have no audio output. Other features work in the cloud.
-
-## Deploy elsewhere (Render, Railway, etc.)
-
-- Use the same `requirements.txt` and start command: `streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`
-- Set `OPENAI_API_KEY` as an environment variable.
-- Expect cold starts and memory use from `sentence-transformers` + `torch`.
+5. Deploy.
 
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| "Please upload a PDF first" | Process a PDF in the sidebar first. |
-| API key errors | Set `OPENAI_API_KEY` in `.env` (restart the app after editing). |
-| Re-upload same file | The app replaces the Chroma collection for that filename automatically. |
-| Slow first question | Embedding model loads on first use; wait for processing to finish. |
+| "Please upload a PDF first" | Upload and wait until the file shows as ready. |
+| Gemini API key errors | Set `GEMINI_API_KEY` in `.env` and restart Streamlit. |
+| Quota / 429 errors | Check usage at [AI Studio](https://aistudio.google.com/); wait or switch `GEMINI_MODEL`. |
+| Slow first question | Embedding model loads on first use; wait for PDF indexing to finish. |
 | Read aloud silent on cloud | Use locally; cloud VMs typically have no speakers. |
 
 ## Project layout

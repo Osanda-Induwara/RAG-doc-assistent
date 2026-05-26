@@ -36,11 +36,13 @@ from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import Chroma
 from langchain_core.output_parsers import StrOutputParser
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Load OPENAI_API_KEY from .env locally, platform env vars, or Streamlit secrets
+# Default Gemini model (free tier: gemini-1.5-flash at https://aistudio.google.com)
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+
 load_dotenv()
 
 
@@ -55,13 +57,13 @@ def _streamlit_secrets_available() -> bool:
 
 
 def load_api_key_from_streamlit_secrets() -> None:
-    """Optional: load OPENAI_API_KEY from Streamlit secrets (cloud or local secrets.toml)."""
-    if os.getenv("OPENAI_API_KEY") or not _streamlit_secrets_available():
+    """Optional: load GEMINI_API_KEY from Streamlit secrets (cloud or local secrets.toml)."""
+    if get_gemini_api_key() or not _streamlit_secrets_available():
         return
     try:
-        key = st.secrets.get("OPENAI_API_KEY", "")
+        key = st.secrets.get("GEMINI_API_KEY", "") or st.secrets.get("GOOGLE_API_KEY", "")
         if key:
-            os.environ["OPENAI_API_KEY"] = key
+            os.environ["GEMINI_API_KEY"] = key
     except Exception:
         pass
 
@@ -470,20 +472,26 @@ def file_signature(uploaded_file) -> str:
     return f"{uploaded_file.name}:{uploaded_file.size}"
 
 
-def get_openai_api_key() -> Optional[str]:
-    return os.getenv("OPENAI_API_KEY", "").strip() or None
+def get_gemini_api_key() -> Optional[str]:
+    """GEMINI_API_KEY in .env, or GOOGLE_API_KEY as alias."""
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return key.strip() if key else None
+
+
+def get_gemini_model() -> str:
+    return os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
 
 
 def run_rag_query(question: str) -> str:
-    """Retrieve top-5 chunks, then answer with GPT-3.5-turbo (LangChain LCEL chain)."""
+    """Retrieve top-5 chunks, then answer with Google Gemini (LangChain LCEL chain)."""
     retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 5})
     docs = retriever.invoke(question)
     context = "\n\n---\n\n".join(doc.page_content for doc in docs)
 
-    llm = ChatOpenAI(
-        model="gpt-3.5-turbo",
+    llm = ChatGoogleGenerativeAI(
+        model=get_gemini_model(),
         temperature=0.3,
-        openai_api_key=get_openai_api_key(),
+        google_api_key=get_gemini_api_key(),
     )
     chain = RAG_PROMPT | llm | StrOutputParser()
     return chain.invoke({"context": context, "question": question})
@@ -545,8 +553,11 @@ def handle_user_question(question: str) -> None:
         st.warning("Please upload a PDF first.")
         return
 
-    if not get_openai_api_key():
-        st.error("OpenAI API key missing. Add OPENAI_API_KEY to your `.env` file.")
+    if not get_gemini_api_key():
+        st.error(
+            "Gemini API key missing. Add GEMINI_API_KEY to your `.env` file. "
+            "Get a free key at https://aistudio.google.com/apikey"
+        )
         return
 
     st.session_state.messages.append({"role": "user", "content": question})
