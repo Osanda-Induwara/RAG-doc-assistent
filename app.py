@@ -3,6 +3,7 @@ DocMind — RAG-based Document Assistant (Streamlit)
 Upload a PDF, ask questions, get answers grounded in your document.
 """
 
+import base64
 import os
 import re
 import shutil
@@ -10,6 +11,12 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import List, Optional
+
+APP_DIR = Path(__file__).resolve().parent
+BG_IMAGE_PATH = APP_DIR / "assets" / "document-bg.jpg"
+BG_IMAGE_FALLBACK = (
+    "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=1920&q=80"
+)
 
 import fitz  # PyMuPDF
 import pyttsx3
@@ -52,90 +59,260 @@ def load_api_key_from_streamlit_secrets() -> None:
     except Exception:
         pass
 
+
+def get_background_image_url() -> str:
+    """Local asset as data URL, or remote fallback for document-themed background."""
+    if BG_IMAGE_PATH.is_file():
+        encoded = base64.b64encode(BG_IMAGE_PATH.read_bytes()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    return BG_IMAGE_FALLBACK
+
+
+def inject_theme_css() -> None:
+    """Mockup-style UI: charcoal base, bottom document image with gradient fade."""
+    bg_url = get_background_image_url()
+    st.markdown(
+        f"""
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Playfair+Display:wght@500;600&display=swap" rel="stylesheet">
+        <style>
+        /* Hide chrome */
+        [data-testid="stSidebar"], [data-testid="collapsedControl"],
+        #MainMenu, footer, header {{ visibility: hidden; height: 0; }}
+        .stApp {{
+            background-color: #232528;
+        }}
+        /* Bottom document image + fade into solid charcoal above */
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            left: 0; right: 0; bottom: 0;
+            height: 62vh;
+            z-index: 0;
+            pointer-events: none;
+            background-image:
+                linear-gradient(
+                    180deg,
+                    #232528 0%,
+                    #232528 18%,
+                    rgba(35, 37, 40, 0.97) 38%,
+                    rgba(35, 37, 40, 0.75) 58%,
+                    rgba(35, 37, 40, 0.45) 78%,
+                    rgba(35, 37, 40, 0.15) 100%
+                ),
+                url("{bg_url}");
+            background-size: cover;
+            background-position: center bottom;
+            background-repeat: no-repeat;
+        }}
+        .main .block-container {{
+            max-width: 720px;
+            padding-top: 2.5rem;
+            padding-bottom: 4rem;
+            position: relative;
+            z-index: 1;
+        }}
+        .dm-header {{
+            text-align: center;
+            margin-bottom: 2rem;
+        }}
+        .dm-title {{
+            font-family: 'Playfair Display', Georgia, serif;
+            font-size: clamp(2.8rem, 6vw, 3.75rem);
+            font-weight: 500;
+            color: #ffffff;
+            margin: 0 0 0.35rem 0;
+            letter-spacing: 0.02em;
+        }}
+        .dm-subtitle {{
+            font-family: 'Inter', system-ui, sans-serif;
+            font-size: 0.72rem;
+            font-weight: 500;
+            letter-spacing: 0.28em;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.92);
+            margin: 0;
+        }}
+        .dm-section {{
+            margin-bottom: 1.25rem;
+        }}
+        /* Quick prompt pills */
+        .st-key-shortcut_comprehensive button,
+        .st-key-shortcut_oneline button,
+        .st-key-shortcut_plain button {{
+            background: transparent !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.85) !important;
+            border-radius: 999px !important;
+            padding: 0.55rem 0.35rem !important;
+            font-family: 'Inter', sans-serif !important;
+            font-size: 0.78rem !important;
+            font-weight: 400 !important;
+            min-height: 2.6rem !important;
+            transition: background 0.2s ease !important;
+        }}
+        .st-key-shortcut_comprehensive button:hover,
+        .st-key-shortcut_oneline button:hover,
+        .st-key-shortcut_plain button:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+            border-color: #ffffff !important;
+        }}
+        /* Search bar container */
+        [data-testid="stForm"] {{
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 999px;
+            padding: 0.35rem 0.35rem 0.35rem 1.1rem;
+            background: rgba(20, 21, 23, 0.55);
+            backdrop-filter: blur(6px);
+        }}
+        [data-testid="stForm"] [data-testid="stTextInput"] input {{
+            background: transparent !important;
+            color: #ffffff !important;
+            border: none !important;
+            font-family: 'Inter', sans-serif !important;
+            font-size: 0.95rem !important;
+        }}
+        [data-testid="stForm"] [data-testid="stTextInput"] input::placeholder {{
+            color: rgba(255, 255, 255, 0.45) !important;
+        }}
+        [data-testid="stForm"] [data-testid="stTextInput"] label {{
+            display: none !important;
+        }}
+        [data-testid="stFormSubmitButton"] > button {{
+            background: transparent !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.85) !important;
+            border-radius: 999px !important;
+            font-family: 'Inter', sans-serif !important;
+            font-size: 0.9rem !important;
+            min-height: 2.5rem !important;
+            padding: 0 1.35rem !important;
+            width: 100% !important;
+        }}
+        [data-testid="stFormSubmitButton"] > button:hover {{
+            background: rgba(255, 255, 255, 0.1) !important;
+        }}
+        [data-testid="stFormSubmitButton"] > button p {{
+            font-size: 0.9rem !important;
+        }}
+        /* File upload drop zone */
+        [data-testid="stFileUploader"] {{
+            background: rgba(20, 21, 23, 0.35);
+            border: 1.5px dashed rgba(255, 255, 255, 0.35);
+            border-radius: 20px;
+            padding: 0.5rem 0.25rem 1rem;
+        }}
+        [data-testid="stFileUploader"] section {{
+            padding: 1.5rem 1rem !important;
+        }}
+        [data-testid="stFileUploader"] label {{
+            display: none !important;
+        }}
+        [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] {{
+            border: none !important;
+            background: transparent !important;
+        }}
+        [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] div {{
+            color: rgba(255, 255, 255, 0.9) !important;
+            font-family: 'Inter', sans-serif !important;
+        }}
+        [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] svg {{
+            stroke: #ffffff !important;
+            fill: #ffffff !important;
+        }}
+        [data-testid="stFileUploader"] small {{
+            color: rgba(255, 255, 255, 0.5) !important;
+            font-family: 'Inter', sans-serif !important;
+        }}
+        [data-testid="stFileUploader"] button {{
+            background: transparent !important;
+            color: #ffffff !important;
+            border: 1px solid rgba(255, 255, 255, 0.85) !important;
+            border-radius: 999px !important;
+            font-family: 'Inter', sans-serif !important;
+        }}
+        [data-testid="stFileUploader"] button:hover {{
+            background: rgba(255, 255, 255, 0.08) !important;
+        }}
+        /* Chat area */
+        .chat-card {{
+            background: rgba(20, 21, 23, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 16px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            backdrop-filter: blur(8px);
+        }}
+        .user-bubble {{
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+            padding: 0.75rem 1rem;
+            border-radius: 16px 16px 4px 16px;
+            margin: 0.5rem 0 0.5rem 10%;
+            text-align: right;
+            font-family: 'Inter', sans-serif;
+        }}
+        .ai-bubble {{
+            background: rgba(255, 255, 255, 0.06);
+            color: #f0f0f0;
+            padding: 0.75rem 1rem;
+            border-radius: 16px 16px 16px 4px;
+            margin: 0.5rem 10% 0.5rem 0;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            font-family: 'Inter', sans-serif;
+        }}
+        .outside-warning {{
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            margin-top: 0.5rem;
+        }}
+        .dm-status {{
+            text-align: center;
+            color: rgba(255, 255, 255, 0.7);
+            font-family: 'Inter', sans-serif;
+            font-size: 0.85rem;
+            margin-top: -0.5rem;
+            margin-bottom: 1rem;
+        }}
+        div[data-testid="stAlert"] {{
+            background: rgba(20, 21, 23, 0.85) !important;
+            border-radius: 12px !important;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Page config & custom CSS (dark gradient, card chat, message bubbles)
+# Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="DocMind — Chat with your Documents",
+    page_title="DocMind",
     page_icon="📄",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed",
 )
 
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: linear-gradient(135deg, #0f0d29 0%, #302b63 50%, #24243e 100%);
-    }
-    .main-title {
-        text-align: center;
-        color: #f0f0f5;
-        font-size: 2.2rem;
-        font-weight: 700;
-        margin-bottom: 0.25rem;
-        letter-spacing: -0.02em;
-    }
-    .main-subtitle {
-        text-align: center;
-        color: #a8a8b8;
-        font-size: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .chat-card {
-        background: rgba(255, 255, 255, 0.06);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 16px;
-        padding: 1.25rem 1.5rem;
-        max-width: 900px;
-        margin: 0 auto 1rem auto;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
-    }
-    .user-bubble {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 0.75rem 1rem;
-        border-radius: 18px 18px 4px 18px;
-        margin: 0.5rem 0 0.5rem 15%;
-        text-align: right;
-    }
-    .ai-bubble {
-        background: rgba(255, 255, 255, 0.1);
-        color: #e8e8f0;
-        padding: 0.75rem 1rem;
-        border-radius: 18px 18px 18px 4px;
-        margin: 0.5rem 15% 0.5rem 0;
-        text-align: left;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-    }
-    .outside-warning {
-        background: #fff3cd;
-        color: #856404;
-        border: 1px solid #ffc107;
-        border-radius: 8px;
-        padding: 0.75rem 1rem;
-        margin-top: 0.5rem;
-    }
-    [data-testid="stSidebar"], [data-testid="collapsedControl"] {
-        display: none;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+inject_theme_css()
 
-# Shortcut button labels → extra instruction appended to the user query
+# Shortcut buttons (display label, RAG instruction)
 SHORTCUT_PROMPTS = {
     "comprehensive": (
-        "📖 Comprehensive Explanation",
+        "☰  Comprehensive explanation",
         "Give a detailed, thorough explanation covering all relevant points from the document.",
     ),
     "oneline": (
-        "⚡ One Line Summary",
+        "⚡  One line summary",
         "Summarize the answer in exactly one clear sentence.",
     ),
     "plain": (
-        "🗣️ Plain English",
+        "🗣  Plain English",
         "Explain as simply as possible, as if speaking to a 10-year-old.",
     ),
 }
@@ -389,21 +566,27 @@ def handle_pdf_upload(uploaded) -> None:
     if st.session_state.processed_file_signature == signature:
         return
 
-    with st.spinner("Indexing your PDF (first time may take a minute)..."):
+    with st.spinner("Indexing your PDF..."):
         ok = process_pdf(uploaded)
     if ok:
         st.session_state.processed_file_signature = signature
-        st.success(f"Ready: **{st.session_state.uploaded_filename}** ({st.session_state.chunk_count} chunks)")
     else:
         st.session_state.processed_file_signature = None
 
 
 # ---------------------------------------------------------------------------
-# Main UI: title → chat → shortcuts → prompt → upload
+# Main UI (matches mockup: header → chat → pills → search → upload)
 # ---------------------------------------------------------------------------
-st.markdown('<p class="main-title">DocMind — Chat with your Documents</p>', unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="dm-header">
+        <h1 class="dm-title">DocMind</h1>
+        <p class="dm-subtitle">Chat with your documents</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-# Chat history (only when there are messages — no empty box above Quick prompts)
 if st.session_state.messages:
     st.markdown('<div class="chat-card">', unsafe_allow_html=True)
     for i, msg in enumerate(st.session_state.messages):
@@ -416,8 +599,7 @@ if st.session_state.messages:
             display_ai_message(msg["content"], i)
     st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("##### Quick prompts")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns(3, gap="small")
 for col, (key, (label, instruction)) in zip([col1, col2, col3], SHORTCUT_PROMPTS.items()):
     with col:
         if st.button(label, use_container_width=True, key=f"shortcut_{key}"):
@@ -425,9 +607,8 @@ for col, (key, (label, instruction)) in zip([col1, col2, col3], SHORTCUT_PROMPTS
             st.session_state.auto_submit = True
             st.rerun()
 
-# Question box + Search button (form so Enter also submits)
 with st.form("query_form", clear_on_submit=True):
-    input_col, btn_col = st.columns([6, 1])
+    input_col, btn_col = st.columns([5, 1])
     with input_col:
         user_query = st.text_input(
             "Your question",
@@ -436,18 +617,23 @@ with st.form("query_form", clear_on_submit=True):
         )
     with btn_col:
         search_clicked = st.form_submit_button(
-            "🔍 Search",
-            type="primary",
+            "Search",
             use_container_width=True,
         )
 
-# PDF upload directly under the prompt
 uploaded = st.file_uploader(
-    "Browse and upload a PDF",
+    "Upload",
     type=["pdf"],
-    help="Select a PDF — it indexes automatically so you can chat.",
+    label_visibility="collapsed",
+    help="PDF only, max 200 MB",
 )
 handle_pdf_upload(uploaded)
+
+if st.session_state.uploaded_filename and st.session_state.processed_file_signature:
+    st.markdown(
+        f'<p class="dm-status">✓ {st.session_state.uploaded_filename} — ready to chat</p>',
+        unsafe_allow_html=True,
+    )
 
 # Process shortcut, Search button, or pending query
 query_to_run = None
