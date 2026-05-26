@@ -14,29 +14,6 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", message=".*torch.classes.*")
 warnings.filterwarnings("ignore", message=".*Examining the path of torch.classes.*")
 
-
-def _silence_chroma_telemetry() -> None:
-    """Chroma 0.5 + newer PostHog breaks capture(); use a no-op client."""
-    try:
-        import chromadb.telemetry.product.posthog as posthog_mod
-
-        class _NoOpPosthog:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def capture(self, *args, **kwargs):
-                return None
-
-            def identify(self, *args, **kwargs):
-                return None
-
-        posthog_mod.Posthog = _NoOpPosthog
-    except Exception:
-        pass
-
-
-_silence_chroma_telemetry()
-
 import base64
 import re
 import shutil
@@ -51,10 +28,10 @@ BG_IMAGE_FALLBACK = (
     "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=1920&q=80"
 )
 
+import chromadb
 import fitz  # PyMuPDF
 import pyttsx3
 import streamlit as st
-from chromadb.config import Settings as ChromaSettings
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import Chroma
@@ -62,8 +39,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-CHROMA_CLIENT_SETTINGS = ChromaSettings(anonymized_telemetry=False)
 
 # Load OPENAI_API_KEY from .env locally, platform env vars, or Streamlit secrets
 load_dotenv()
@@ -378,6 +353,7 @@ def init_session_state() -> None:
         "chunk_count": 0,
         "embeddings": None,
         "chroma_persist_dir": None,
+        "chroma_client": None,
         "processed_file_signature": None,
         "pending_query": None,
         "auto_submit": False,
@@ -415,12 +391,21 @@ def get_embeddings() -> HuggingFaceEmbeddings:
 
 
 def reset_chroma_storage() -> str:
-    """New temp folder per PDF — avoids Chroma sqlite 'no such table' errors on re-upload."""
+    """New temp folder per PDF — avoids Chroma sqlite errors on re-upload."""
     if st.session_state.chroma_persist_dir:
         shutil.rmtree(st.session_state.chroma_persist_dir, ignore_errors=True)
     path = tempfile.mkdtemp(prefix="docmind_chroma_")
     st.session_state.chroma_persist_dir = path
+    st.session_state.chroma_client = None
     return path
+
+
+def create_chroma_client(persist_dir: str):
+    """PersistentClient only — do not use chromadb.Client() (tenant / settings conflicts)."""
+    return chromadb.PersistentClient(
+        path=persist_dir,
+        settings=chromadb.config.Settings(anonymized_telemetry=False),
+    )
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -462,14 +447,14 @@ def process_pdf(uploaded_file) -> bool:
 
     embeddings = get_embeddings()
     persist_dir = reset_chroma_storage()
+    chroma_client = create_chroma_client(persist_dir)
+    st.session_state.chroma_client = chroma_client
 
-    # LangChain manages Chroma in a session temp folder (stable with chromadb 0.5+)
     vectorstore = Chroma.from_texts(
         texts=chunks,
         embedding=embeddings,
         collection_name=collection_name,
-        persist_directory=persist_dir,
-        client_settings=CHROMA_CLIENT_SETTINGS,
+        client=chroma_client,
     )
 
     st.session_state.vectorstore = vectorstore
