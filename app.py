@@ -335,20 +335,47 @@ SHORTCUT_PROMPTS = {
     ),
 }
 
-SYSTEM_INSTRUCTION = (
-    "Answer only from the provided document context. "
-    "If you use any knowledge outside the provided context, "
-    "clearly start that part with: ⚠️ Outside Knowledge: "
-)
+# Retrieval settings (larger chunks + more results = better for research papers)
+RETRIEVAL_K = 12
+RETRIEVAL_FETCH_K = 28
+CHUNK_SIZE = 900
+CHUNK_OVERLAP = 180
+
+# Map common student questions to text that often appears in academic PDFs
+SECTION_SEARCH_PATTERNS = {
+    "introduction": ["introduction", "1 introduction", "1. introduction", "i. introduction"],
+    "abstract": ["abstract"],
+    "conclusion": ["conclusion", "conclusions", "summary"],
+    "method": ["methodology", "methods", "materials and methods", "experimental"],
+    "methodology": ["methodology", "methods", "materials and methods"],
+    "results": ["results", "findings", "experiments"],
+    "discussion": ["discussion"],
+    "reference": ["references", "bibliography"],
+    "background": ["background", "related work", "literature"],
+}
 
 RAG_PROMPT = PromptTemplate(
-    input_variables=["context", "question"],
-    template=(
-        "You are DocMind, a helpful document assistant.\n\n"
-        + SYSTEM_INSTRUCTION
-        + "\n\n--- Document context ---\n{context}\n--- End context ---\n\n"
-        "User question: {question}\n\nAnswer:"
-    ),
+    input_variables=["context", "question", "document_name"],
+    template="""You are DocMind, a patient tutor helping a student understand ONE uploaded document.
+
+DOCUMENT NAME: "{document_name}"
+This is a PDF file the student uploaded. When they say "PDF", "document", "paper", "article", or "file", they mean THIS uploaded file — never "probability density function" or other acronyms.
+
+RULES:
+1. Answer using ONLY the excerpts below. Quote or paraphrase them accurately.
+2. If a section (e.g. Introduction) appears in the excerpts under any heading (Introduction, 1 Introduction, I. INTRODUCTION, etc.), describe it — do not claim it is missing.
+3. If excerpts are partial, say what you CAN see (include page markers like "--- Page 3 ---" when cited) and what is unclear.
+4. If excerpts truly lack the answer, say: "The retrieved passages do not include …" and suggest a clearer question (e.g. "What does the Introduction on page 2 say about …?").
+5. Use clear, learner-friendly language. Use short paragraphs or bullet points when helpful.
+6. Outside the excerpts, only add general study tips if needed — prefix with: ⚠️ Outside Knowledge:
+
+--- EXCERPTS FROM THE DOCUMENT ---
+{context}
+--- END EXCERPTS ---
+
+STUDENT QUESTION: {question}
+
+HELPFUL, ACCURATE ANSWER:""",
 )
 
 
@@ -366,6 +393,7 @@ def init_session_state() -> None:
         "embeddings": None,
         "chroma_persist_dir": None,
         "chroma_client": None,
+        "all_chunks": [],
         "processed_file_signature": None,
         "pending_query": None,
         "auto_submit": False,
@@ -421,21 +449,102 @@ def create_chroma_client(persist_dir: str):
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Parse PDF bytes with PyMuPDF and return concatenated page text."""
+    """Parse PDF with page markers so answers can cite location (helps Introduction, etc.)."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = [page.get_text() for page in doc]
+    pages = []
+    for num, page in enumerate(doc, start=1):
+        page_text = page.get_text("text").strip()
+        if page_text:
+            pages.append(f"--- Page {num} ---\n{page_text}")
     doc.close()
     return "\n\n".join(pages).strip()
 
 
 def chunk_text(text: str) -> List[str]:
-    """Split document text into overlapping chunks via LangChain."""
+    """Split text into larger overlapping chunks; prefer breaks at page/paragraph boundaries."""
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50,
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
         length_function=len,
+        separators=["\n--- Page ", "\n\n", "\n", ". ", " ", ""],
     )
     return splitter.split_text(text)
+
+
+def expand_query_for_retrieval(question: str, document_name: str) -> str:
+    """Rewrite query so retrieval matches uploaded PDF content, not generic 'PDF' meanings."""
+    parts = [question]
+    q_lower = question.lower()
+
+    if re.search(r"\b(pdf|pdfs)\b", question, re.I):
+        parts.append(
+            f"uploaded PDF document file named {document_name} full text sections content"
+        )
+    if re.search(r"\b(paper|document|article|file|upload)\b", question, re.I):
+        parts.append(f"text content from document {document_name}")
+
+    for section_key, patterns in SECTION_SEARCH_PATTERNS.items():
+        if section_key in q_lower:
+            parts.extend(patterns)
+
+    return " ".join(parts)
+
+
+def section_keywords_from_question(question: str) -> List[str]:
+    """Keywords to find section headings inside the stored chunks."""
+    q_lower = question.lower()
+    keywords: List[str] = []
+    for section_key, patterns in SECTION_SEARCH_PATTERNS.items():
+        if section_key in q_lower:
+            keywords.extend(patterns)
+    return keywords
+
+
+def keyword_boost_chunks(question: str, all_chunks: List[str], max_extra: int = 5) -> List[str]:
+    """Pull chunks that literally contain section titles (fixes missed Introduction, etc.)."""
+    keywords = section_keywords_from_question(question)
+    if not keywords:
+        return []
+
+    boosted: List[str] = []
+    for chunk in all_chunks:
+        chunk_lower = chunk.lower()
+        if any(kw in chunk_lower for kw in keywords):
+            boosted.append(chunk)
+            if len(boosted) >= max_extra:
+                break
+    return boosted
+
+
+def retrieve_context(question: str) -> str:
+    """Semantic search (MMR) plus keyword boost for section-style questions."""
+    document_name = st.session_state.uploaded_filename or "uploaded document"
+    search_query = expand_query_for_retrieval(question, document_name)
+
+    retriever = st.session_state.vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": RETRIEVAL_K,
+            "fetch_k": RETRIEVAL_FETCH_K,
+            "lambda_mult": 0.75,
+        },
+    )
+    docs = retriever.invoke(search_query)
+
+    seen: set[str] = set()
+    parts: List[str] = []
+    for doc in docs:
+        text = doc.page_content.strip()
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+
+    for chunk in keyword_boost_chunks(question, st.session_state.get("all_chunks", [])):
+        if chunk not in seen:
+            seen.add(chunk)
+            parts.append(chunk)
+
+    return "\n\n---\n\n".join(parts[:16])
 
 
 def process_pdf(uploaded_file) -> bool:
@@ -473,6 +582,7 @@ def process_pdf(uploaded_file) -> bool:
     st.session_state.current_collection = collection_name
     st.session_state.uploaded_filename = filename
     st.session_state.chunk_count = len(chunks)
+    st.session_state.all_chunks = chunks
     st.session_state.messages = []  # fresh chat for new document
     return True
 
@@ -483,18 +593,29 @@ def file_signature(uploaded_file) -> str:
 
 
 def run_rag_query(question: str) -> str:
-    """Retrieve top-5 chunks, then answer with Google Gemini (LangChain LCEL chain)."""
-    retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 5})
-    docs = retriever.invoke(question)
-    context = "\n\n---\n\n".join(doc.page_content for doc in docs)
+    """Retrieve relevant excerpts, then answer with Gemini using a learner-focused prompt."""
+    context = retrieve_context(question)
+    if not context.strip():
+        return (
+            "I could not find relevant passages in your document. "
+            "Try re-uploading the PDF or ask about a specific page or section name."
+        )
+
+    document_name = st.session_state.uploaded_filename or "your uploaded PDF"
 
     llm = ChatGoogleGenerativeAI(
         model=get_gemini_model(),
-        temperature=0.3,
+        temperature=0.1,
         google_api_key=get_gemini_api_key(),
     )
     chain = RAG_PROMPT | llm | StrOutputParser()
-    return chain.invoke({"context": context, "question": question})
+    return chain.invoke(
+        {
+            "context": context,
+            "question": question,
+            "document_name": document_name,
+        }
+    )
 
 
 def speak_text(text: str) -> None:
@@ -581,7 +702,7 @@ def handle_pdf_upload(uploaded) -> None:
     if st.session_state.processed_file_signature == signature:
         return
 
-    with st.spinner("Indexing your PDF..."):
+    with st.spinner("Indexing your PDF (reading all pages)..."):
         ok = process_pdf(uploaded)
     if ok:
         st.session_state.processed_file_signature = signature
